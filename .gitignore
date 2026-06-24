@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+
+# Local outputs and geospatial data should not be committed by default.
+outputs/
+openplus_outputs/
+*.tif
+*.tiff
+*.img
+*.rar
+*.zip
+*.exe
+*.dll
+*.pdf
+*.tmp
+
+# Editor files.
+.vscode/
+.idea/
+
