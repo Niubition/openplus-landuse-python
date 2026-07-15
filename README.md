@@ -1,13 +1,15 @@
 # OpenPLUS Python
 
-Clean-room Python approximation of the PLUS model workflow.
+Clean-room Python approximation of the PLUS land-use simulation workflow.
+
+PLUS模型工作流程的 Python 洁净室近似实现。
 
 This repository contains a Python implementation of the main PLUS-style
-workflow used in this project:
+workflow:
 
 - extract land expansion from two LULC rasters
-- train LEAS-like development-potential rasters
-- run a CARS-like cellular automata simulation
+- train LEAS-like development-potential rasters from driving factors
+- run a CARS-like cellular automata simulation under land-demand constraints
 - validate simulation results with OA, Kappa, confusion matrix, and FoM
 
 ## Source and Background
@@ -35,7 +37,7 @@ https://github.com/HPSCIL/Patch-generating_Land_Use_Simulation_Model
 ## What We Did
 
 This code was written as a **clean-room reimplementation** based on public
-materials: the PLUS paper, public manuals, parameter files, and sample data
+materials: the PLUS paper, public manuals, parameter files, and sample-data
 behavior.
 
 It does **not** contain extracted, decompiled, or reverse-engineered code from
@@ -49,6 +51,16 @@ The implementation in `openplus.py` provides:
 - validation utilities for overall accuracy, Kappa, confusion matrix, and FoM
 - optional calibration by selecting the best simulation iteration using a known
   truth raster
+
+Recent implementation update:
+
+- the CARS simulator now builds an integer source-to-target transition plan
+  before iteration, so the requested land demands must be reachable under the
+  supplied transition matrix;
+- if the transition matrix cannot satisfy the demand vector, the program stops
+  with an explicit error instead of silently drifting;
+- the transition matrix convention is documented as rows=current land-use
+  classes and columns=future land-use classes.
 
 ## Requirements
 
@@ -144,4 +156,3 @@ streams, tie-breaking rules, and every nodata edge case.
 
 Use this repository for research, learning, and reproducible experimentation.
 For official PLUS behavior, cite and use the official PLUS software and papers.
-

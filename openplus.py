@@ -686,6 +686,87 @@ def counts_for_classes(arr: np.ndarray, valid: np.ndarray, classes: list[int]) -
     return np.array([int(np.sum(valid & (arr == class_id))) for class_id in classes], dtype="int64")
 
 
+def build_transition_plan(counts: np.ndarray, demands: np.ndarray, transition: np.ndarray) -> np.ndarray:
+    """Find an integer source-to-target flow that satisfies all class demands."""
+    if int(counts.sum()) != int(demands.sum()):
+        raise SystemExit("Initial class counts and demands must have the same total.")
+
+    class_count = len(counts)
+    source = class_count * 2
+    sink = source + 1
+    graph: list[list[list[int]]] = [[] for _ in range(sink + 1)]
+
+    def add_edge(start: int, end: int, capacity: int) -> tuple[int, int, int]:
+        forward = [end, len(graph[end]), int(capacity)]
+        reverse = [start, len(graph[start]), 0]
+        graph[start].append(forward)
+        graph[end].append(reverse)
+        return start, len(graph[start]) - 1, int(capacity)
+
+    for idx, count in enumerate(counts):
+        add_edge(source, idx, int(count))
+
+    tracked_edges: dict[tuple[int, int], tuple[int, int, int]] = {}
+    for current_idx in range(class_count):
+        targets = list(range(class_count))
+        if transition[current_idx, current_idx] == 1:
+            targets.remove(current_idx)
+            targets.insert(0, current_idx)
+        for target_idx in targets:
+            if transition[current_idx, target_idx] == 1:
+                tracked_edges[current_idx, target_idx] = add_edge(
+                    current_idx,
+                    class_count + target_idx,
+                    int(counts[current_idx]),
+                )
+
+    for idx, demand in enumerate(demands):
+        add_edge(class_count + idx, sink, int(demand))
+
+    total_flow = 0
+    while True:
+        parent: list[tuple[int, int] | None] = [None] * len(graph)
+        parent[source] = (source, -1)
+        queue = [source]
+        for node in queue:
+            for edge_idx, edge in enumerate(graph[node]):
+                if edge[2] > 0 and parent[edge[0]] is None:
+                    parent[edge[0]] = (node, edge_idx)
+                    queue.append(edge[0])
+                    if edge[0] == sink:
+                        break
+            if parent[sink] is not None:
+                break
+        if parent[sink] is None:
+            break
+
+        amount = int(counts.sum())
+        node = sink
+        while node != source:
+            previous, edge_idx = parent[node]
+            amount = min(amount, graph[previous][edge_idx][2])
+            node = previous
+        node = sink
+        while node != source:
+            previous, edge_idx = parent[node]
+            edge = graph[previous][edge_idx]
+            edge[2] -= amount
+            graph[node][edge[1]][2] += amount
+            node = previous
+        total_flow += amount
+
+    if total_flow != int(counts.sum()):
+        raise SystemExit(
+            "Transition matrix cannot satisfy the requested demands: "
+            f"assigned {total_flow} of {int(counts.sum())} cells."
+        )
+
+    plan = np.zeros((class_count, class_count), dtype="int64")
+    for (current_idx, target_idx), (node, edge_idx, capacity) in tracked_edges.items():
+        plan[current_idx, target_idx] = capacity - graph[node][edge_idx][2]
+    return plan
+
+
 def classification_metrics(truth: np.ndarray, simulation: np.ndarray, valid: np.ndarray, classes: list[int]) -> tuple[float, float]:
     total = int(valid.sum())
     if total == 0:
@@ -754,72 +835,65 @@ def simulate_cars(args: argparse.Namespace) -> None:
             metrics_rows.append([0, overall, kappa, *counts_for_classes(current, valid, classes).tolist()])
         max_iterations = args.max_iterations or max(50, int(args.years) * 100)
         history: list[list[int]] = []
-        inertia = np.ones(len(classes), dtype="float32")
-        previous_gap = demand_values - counts_for_classes(current, valid, classes)
+        initial = current.copy()
+        initial_counts = counts_for_classes(initial, valid, classes)
+        transition_plan = build_transition_plan(initial_counts, demand_values, transition)
+        remaining_plan = transition_plan.copy()
+        np.fill_diagonal(remaining_plan, 0)
 
         for iteration in range(1, max_iterations + 1):
             counts = counts_for_classes(current, valid, classes)
             gap = demand_values - counts
             history.append([iteration, *counts.tolist()])
-            if np.all(np.abs(gap) <= args.tolerance):
+            if int(remaining_plan.sum()) == 0:
                 print(f"CARS stopped at iteration {iteration}: demands reached within tolerance.")
                 break
 
-            positive = np.flatnonzero(gap > args.tolerance)
-            if positive.size == 0:
-                print(f"CARS stopped at iteration {iteration}: no class has positive demand gap.")
-                break
-
-            for idx in positive:
-                if abs(previous_gap[idx]) > 0 and abs(gap[idx]) > abs(previous_gap[idx]):
-                    inertia[idx] *= min(2.0, abs(gap[idx]) / max(abs(previous_gap[idx]), 1))
-                else:
-                    inertia[idx] = max(0.25, inertia[idx] * 0.98)
-            previous_gap = gap.copy()
-
-            best_cell_score = np.full(current.shape, -1.0, dtype="float32")
-            best_class = np.zeros(current.shape, dtype=current.dtype)
             remaining_iterations = max(1, max_iterations - iteration + 1)
-
-            for idx in positive:
-                class_id = classes[idx]
+            changed_total = 0
+            for target_idx, class_id in enumerate(classes):
+                if int(remaining_plan[:, target_idx].sum()) == 0:
+                    continue
                 class_mask = current == class_id
                 neighbor = box_count(class_mask, args.neighborhood) / float(args.neighborhood * args.neighborhood - 1)
-                neighbor *= weights[idx]
-                prob = probabilities[idx]
+                neighbor *= weights[target_idx]
+                prob = probabilities[target_idx]
                 random_values = rng.random(current.shape, dtype="float32")
                 seed_mask = (neighbor <= 0) & (random_values < (prob * args.seed_percentage))
                 seed_bonus = seed_mask.astype("float32") * args.expansion_coefficient * random_values
-                score = prob * (neighbor + seed_bonus) * inertia[idx]
-                allowed = transition_allowed(current, class_id, classes, transition)
-                score[~(allowed & convertible & valid)] = -1.0
-                score[current == class_id] = -1.0
-                replace = score > best_cell_score
-                best_cell_score[replace] = score[replace]
-                best_class[replace] = class_id
+                score = prob * (neighbor + seed_bonus)
+                gate = rng.random(current.shape, dtype="float32") < np.clip(
+                    score / max(args.patch_generation, 1e-6), 0.0, 1.0
+                )
 
-            changed_total = 0
-            gate = rng.random(current.shape, dtype="float32") < np.clip(
-                best_cell_score / max(args.patch_generation, 1e-6), 0.0, 1.0
-            )
-            for idx in positive:
-                class_id = classes[idx]
-                candidates = (best_class == class_id) & (best_cell_score > 0)
-                gated = candidates & gate
-                quota = int(math.ceil(max(0, gap[idx]) / remaining_iterations))
-                quota = max(1, min(int(gap[idx]), quota))
-                chosen = choose_top(best_cell_score, gated, quota)
-                if chosen.size < quota:
-                    fallback = candidates.copy()
+                for source_idx, source_class in enumerate(classes):
+                    needed = int(remaining_plan[source_idx, target_idx])
+                    if needed <= 0 or source_idx == target_idx:
+                        continue
+                    candidates = (
+                        (initial == source_class)
+                        & (current == source_class)
+                        & convertible
+                        & valid
+                        & (score > 0)
+                    )
+                    quota = max(1, min(needed, int(math.ceil(needed / remaining_iterations))))
+                    chosen = choose_top(score, candidates & gate, quota)
+                    if chosen.size < quota:
+                        fallback = candidates.copy()
+                        if chosen.size:
+                            fallback.ravel()[chosen] = False
+                        extra = choose_top(score, fallback, quota - chosen.size)
+                        chosen = np.concatenate([chosen, extra])
                     if chosen.size:
-                        fallback.ravel()[chosen] = False
-                    extra = choose_top(best_cell_score, fallback, quota - chosen.size)
-                    chosen = np.concatenate([chosen, extra])
-                if chosen.size:
-                    current.ravel()[chosen] = class_id
-                    changed_total += chosen.size
+                        current.ravel()[chosen] = class_id
+                        remaining_plan[source_idx, target_idx] -= chosen.size
+                        changed_total += chosen.size
 
-            print(f"Iteration {iteration}: changed {changed_total} cells; gaps {gap.tolist()}")
+            print(
+                f"Iteration {iteration}: changed {changed_total} cells; "
+                f"gaps {gap.tolist()}; planned {int(remaining_plan.sum())}"
+            )
             if truth is not None and metric_valid is not None:
                 overall, kappa = classification_metrics(truth, current, metric_valid, classes)
                 metric_value = kappa if args.select_best_by == "kappa" else overall
@@ -830,9 +904,8 @@ def simulate_cars(args: argparse.Namespace) -> None:
                     best_overall = overall
                     best_kappa = kappa
                     best_current = current.copy()
-            if changed_total == 0:
-                print("CARS stopped: no convertible candidates remain.")
-                break
+        else:
+            print(f"CARS reached the {max_iterations}-iteration limit with {int(remaining_plan.sum())} planned changes left.")
 
         if best_current is not None:
             current = best_current
